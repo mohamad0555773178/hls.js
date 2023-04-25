@@ -399,7 +399,8 @@ export default class BaseStreamController
   }
 
   protected clearTrackerIfNeeded(frag: Fragment) {
-    const fragState = this.fragmentTracker.getState(frag);
+    const { fragmentTracker } = this;
+    const fragState = fragmentTracker.getState(frag);
     if (fragState === FragmentState.APPENDING) {
       // Lower the buffer size and try again
       const playlistType = frag.type as PlaylistLevelType;
@@ -412,11 +413,22 @@ export default class BaseStreamController
         bufferedInfo ? bufferedInfo.len : this.config.maxBufferLength
       );
       if (this.reduceMaxBufferLength(minForwardBufferLength)) {
-        this.fragmentTracker.removeFragment(frag);
+        fragmentTracker.removeFragment(frag);
       }
     } else if (this.mediaBuffer?.buffered.length === 0) {
       // Stop gap for bad tracker / buffer flush behavior
-      this.fragmentTracker.removeAllFragments();
+      fragmentTracker.removeAllFragments();
+    } else if (fragmentTracker.appendedParts) {
+      // In low latency mode, remove fragments for which only some parts were buffered
+      fragmentTracker.detectPartialFragments({
+        frag,
+        part: null,
+        stats: frag.stats,
+        id: frag.type,
+      });
+      if (fragmentTracker.getState(frag) === FragmentState.PARTIAL) {
+        fragmentTracker.removeFragment(frag);
+      }
     }
   }
 
@@ -640,77 +652,82 @@ export default class BaseStreamController
     }
 
     targetBufferTime = Math.max(frag.start, targetBufferTime || 0);
-    if (this.config.lowLatencyMode) {
-      const partList = details.partList;
-      if (partList && progressCallback) {
-        if (targetBufferTime > frag.end && details.fragmentHint) {
-          frag = details.fragmentHint;
-        }
-        const partIndex = this.getNextPart(partList, frag, targetBufferTime);
-        if (partIndex > -1) {
-          const part = partList[partIndex];
-          this.log(
-            `Loading part sn: ${frag.sn} p: ${part.index} cc: ${
-              frag.cc
-            } of playlist [${details.startSN}-${
-              details.endSN
-            }] parts [0-${partIndex}-${partList.length - 1}] ${
-              this.logPrefix === '[stream-controller]' ? 'level' : 'track'
-            }: ${frag.level}, target: ${parseFloat(
-              targetBufferTime.toFixed(3)
-            )}`
-          );
-          this.nextLoadPosition = part.start + part.duration;
-          this.state = State.FRAG_LOADING;
-          let result: Promise<PartsLoadedData | FragLoadedData | null>;
-          if (keyLoadingPromise) {
-            result = keyLoadingPromise
-              .then((keyLoadedData) => {
-                if (
-                  !keyLoadedData ||
-                  this.fragContextChanged(keyLoadedData.frag)
-                ) {
-                  return null;
-                }
-                return this.doFragPartsLoad(
-                  frag,
-                  part,
-                  level,
-                  progressCallback
-                );
-              })
-              .catch((error) => this.handleFragLoadError(error));
-          } else {
-            result = this.doFragPartsLoad(
-              frag,
-              part,
-              level,
-              progressCallback
-            ).catch((error: LoadError) => this.handleFragLoadError(error));
-          }
-          this.hls.trigger(Events.FRAG_LOADING, {
+
+    // Only load Low-Latency parts when the playhead is near the live edge
+    const partList = details.partList;
+    const playbackNearLowLatencyEdge =
+      frag.sn !== 'initSegment' &&
+      partList?.length &&
+      details.edge - this.getLoadPosition() < details.targetduration * 3;
+    if (
+      this.config.lowLatencyMode &&
+      playbackNearLowLatencyEdge &&
+      partList &&
+      progressCallback
+    ) {
+      if (targetBufferTime > frag.end && details.fragmentHint) {
+        frag = details.fragmentHint;
+      }
+      const partIndex = this.getNextPart(partList, frag, targetBufferTime);
+      if (partIndex > -1) {
+        const part = partList[partIndex];
+        this.log(
+          `Loading part sn: ${frag.sn} p: ${part.index} cc: ${
+            frag.cc
+          } of playlist [${details.startSN}-${
+            details.endSN
+          }] parts [0-${partIndex}-${partList.length - 1}] ${
+            this.logPrefix === '[stream-controller]' ? 'level' : 'track'
+          }: ${frag.level}, target: ${parseFloat(targetBufferTime.toFixed(3))}`
+        );
+        this.nextLoadPosition = part.start + part.duration;
+        this.state = State.FRAG_LOADING;
+        let result: Promise<PartsLoadedData | FragLoadedData | null>;
+        if (keyLoadingPromise) {
+          result = keyLoadingPromise
+            .then((keyLoadedData) => {
+              if (
+                !keyLoadedData ||
+                this.fragContextChanged(keyLoadedData.frag)
+              ) {
+                return null;
+              }
+              return this.doFragPartsLoad(frag, part, level, progressCallback);
+            })
+            .catch((error) => this.handleFragLoadError(error));
+        } else {
+          result = this.doFragPartsLoad(
             frag,
             part,
-            targetBufferTime,
-          });
-          if (this.fragCurrent === null) {
-            return Promise.reject(
-              new Error(
-                `frag load aborted, context changed in FRAG_LOADING parts`
-              )
-            );
-          }
-          return result;
-        } else if (
-          !frag.url ||
-          this.loadedEndOfParts(partList, targetBufferTime)
-        ) {
-          // Fragment hint has no parts
-          return Promise.resolve(null);
+            level,
+            progressCallback
+          ).catch((error: LoadError) => this.handleFragLoadError(error));
         }
+        this.hls.trigger(Events.FRAG_LOADING, {
+          frag,
+          part,
+          targetBufferTime,
+        });
+        if (this.fragCurrent === null) {
+          return Promise.reject(
+            new Error(
+              `frag load aborted, context changed in FRAG_LOADING parts`
+            )
+          );
+        }
+        return result;
+      } else if (
+        !frag.url ||
+        this.loadedEndOfParts(partList, targetBufferTime)
+      ) {
+        // Fragment hint has no parts to load
+        return Promise.resolve(null);
       }
     }
-
+    if (frag === details.fragmentHint) {
+      // Fragment hint is has no URI and cannot be loaded
+      return Promise.resolve(null);
+    }
     this.log(
       `Loading fragment ${frag.sn} cc: ${frag.cc} ${
         details ? 'of [' + details.startSN + '-' + details.endSN + '] ' : ''

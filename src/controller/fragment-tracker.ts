@@ -38,6 +38,7 @@ export class FragmentTracker implements ComponentAPI {
   private bufferPadding: number = 0.2;
   private hls: Hls;
   private hasGaps: boolean = false;
+  private hasParts: boolean = false;
 
   constructor(hls: Hls) {
     this.hls = hls;
@@ -183,7 +184,7 @@ export class FragmentTracker implements ComponentAPI {
    * Checks if the fragment passed in is loaded in the buffer properly
    * Partially loaded fragments will be registered as a partial fragment
    */
-  private detectPartialFragments(data: FragBufferedData) {
+  public detectPartialFragments(data: FragBufferedData) {
     const timeRanges = this.timeRanges;
     const { frag, part } = data;
     if (!timeRanges || frag.sn === 'initSegment') {
@@ -195,12 +196,12 @@ export class FragmentTracker implements ComponentAPI {
     if (!fragmentEntity) {
       return;
     }
-    Object.keys(timeRanges).forEach((elementaryStream) => {
+    Object.keys(timeRanges).forEach((elementaryStream: SourceBufferName) => {
       const streamInfo = frag.elementaryStreams[elementaryStream];
       if (!streamInfo) {
         return;
       }
-      const timeRange = timeRanges[elementaryStream];
+      const timeRange = timeRanges[elementaryStream] as TimeRanges;
       const partial = part !== null || streamInfo.partial === true;
       fragmentEntity.range[elementaryStream] = this.getBufferedTimes(
         frag,
@@ -410,6 +411,7 @@ export class FragmentTracker implements ComponentAPI {
           this.activeParts = activeParts = [];
         }
         activeParts.push(part);
+        this.hasParts = true;
       } else {
         this.activeParts = null;
       }
@@ -437,6 +439,10 @@ export class FragmentTracker implements ComponentAPI {
         }
       }
     });
+  }
+
+  public get appendedParts(): boolean {
+    return this.hasParts;
   }
 
   private onFragBuffered(event: Events.FRAG_BUFFERED, data: FragBufferedData) {
@@ -496,6 +502,7 @@ export class FragmentTracker implements ComponentAPI {
     this.mainFragEntity = null;
     this.activeParts = null;
     this.hasGaps = false;
+    this.hasParts = false;
   }
 }
 
