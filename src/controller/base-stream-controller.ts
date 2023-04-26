@@ -655,16 +655,13 @@ export default class BaseStreamController
 
     // Only load Low-Latency parts when the playhead is near the live edge
     const partList = details.partList;
-    const playbackNearLowLatencyEdge =
-      frag.sn !== 'initSegment' &&
-      partList?.length &&
-      details.edge - this.getLoadPosition() < details.targetduration * 3;
-    if (
+    const loadLowLatencyParts =
       this.config.lowLatencyMode &&
-      playbackNearLowLatencyEdge &&
-      partList &&
-      progressCallback
-    ) {
+      !!progressCallback &&
+      frag.sn !== 'initSegment' &&
+      !!partList?.length &&
+      details.edge - this.getLoadPosition() < details.targetduration * 3;
+    if (loadLowLatencyParts) {
       if (targetBufferTime > frag.end && details.fragmentHint) {
         frag = details.fragmentHint;
       }
